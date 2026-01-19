@@ -203,22 +203,6 @@ out = st.selectbox(
     key="out",
 )[0]
 
-col1, col2 = st.columns(2)
-with col1:
-    mode = st.selectbox(
-        "模式",
-        options=[
-            ("auto", "自动判定（基于要点触发词）"),
-            ("stable", "偏稳定（低位运行）"),
-            ("noise", "噪音偏多"),
-            ("sensitive", "偏敏感但可控"),
-            ("escalate", "需升级关注"),
-        ],
-        format_func=lambda x: x[1],
-    )[0]
-with col2:
-    out = st.selectbox("输出版本", options=[("A", "A｜30秒版"), ("B", "B｜常规日报版")], format_func=lambda x: x[1])[0]
-
 st.divider()
 st.write("输入要点（可选，建议在 auto 模式下填写；非 auto 模式可留空）")
 media_text = st.text_area("财经媒体要点（可一句话或多条拼接）", height=120)
@@ -291,3 +275,4 @@ st.code(
     "2) 运行：streamlit run app.py\n"
     "3) 选择模式与输出版本，点击“生成”即可复制结果"
 )
+
