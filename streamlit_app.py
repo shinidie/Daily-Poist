@@ -9,6 +9,75 @@
 import streamlit as st
 import re
 from typing import List, Tuple
+from openai import OpenAI
+import os
+
+client = OpenAI()
+if not os.environ.get("OPENAI_API_KEY"):
+    st.warning("未检测到 OPENAI_API_KEY，AI 微调功能将自动停用。")
+    use_ai_A = False
+    use_ai_B = False
+
+A_SYSTEM_PROMPT = """你是资本市场舆情日报撰写助手，输出用于向上级/监管/客户汇报，必须中性、客观、公文风。
+任务：在不新增任何事实、不改变判断方向的前提下，对输入的“30秒舆情快览”进行风格微调。
+硬性要求：
+1) 严禁新增主体、数据、时间点、监管结论或推断；不得引入任何输入中未出现的新信息；
+2) 判断词与风险边界（如“偏稳定/噪音偏多/偏敏感/需升级关注”“未见/暂未/整体/部分/以…为主/尚不构成/可能/需关注”等）不得改变、不得删除、不得弱化；
+3) 输出为一段话，1–2句为宜，总长度不超过原文的1.2倍；
+4) 风格克制、凝练，不口语化，不使用网络表达；
+5) 仅输出改写后的正文，不要标题，不要解释过程。"""
+
+B_SYSTEM_PROMPT = """你是资本市场舆情日报撰写助手，输出用于向上级/监管/客户汇报，必须中性、客观、公文风。
+任务：仅对输入段落进行“风格微调改写”，不得新增/猜测任何事实、数据、主体、时间点、监管结论或法律定性。
+硬性要求：
+1) 严禁引入任何输入中未出现的新事实/新主体/新时间点/新结论；
+2) 必须保留并原样保留所有限定词与风险边界表达（如“未见/暂未/整体/部分/以…为主/尚不构成/可能/需关注”等），不得删除或弱化；
+3) 输出2–4句，长度与输入相近；不得使用项目符号；不口语化，不夸张；
+4) 仅输出改写后的正文，不要标题，不要解释过程。"""
+
+def rewrite_A_with_openai(text: str, style_profile: str, model_name: str) -> str:
+    if not text or not text.strip():
+        return text
+
+    user_input = f"""风格档位：{style_profile}
+原文：{text}"""
+
+    try:
+        resp = client.responses.create(
+            model=model_name,
+            input=[
+                {"role": "system", "content": A_SYSTEM_PROMPT},
+                {"role": "user", "content": user_input},
+            ],
+            max_output_tokens=220,
+        )
+        out = (getattr(resp, "output_text", "") or "").strip()
+        return out if out else text
+    except Exception:
+        return text  # 失败回退
+
+
+def rewrite_B_with_openai(text: str, section_type: str, style_profile: str, model_name: str) -> str:
+    if not text or not text.strip():
+        return text
+
+    user_input = f"""段落类型：{section_type}
+风格档位：{style_profile}
+原段落：{text}"""
+
+    try:
+        resp = client.responses.create(
+            model=model_name,
+            input=[
+                {"role": "system", "content": B_SYSTEM_PROMPT},
+                {"role": "user", "content": user_input},
+            ],
+            max_output_tokens=360,
+        )
+        out = (getattr(resp, "output_text", "") or "").strip()
+        return out if out else text
+    except Exception:
+        return text  # 失败回退
 
 def extract_media_posts(media_text: str, max_items: int = 5) -> List[Tuple[str, str]]:
     """
@@ -204,9 +273,31 @@ out = st.selectbox(
 )[0]
 
 st.divider()
-st.write("输入要点（可选，建议在 auto 模式下填写；非 auto 模式可留空）")
-media_text = st.text_area("财经媒体要点（可一句话或多条拼接）", height=120)
-platform_text = st.text_area("互动平台要点（可一句话或多条拼接）", height=120)
+st.subheader("AI微调（OpenAI API）")
+
+model_name = st.selectbox(
+    "模型名称",
+    options=["gpt-4.1-mini", "gpt-4.1","gpt-5.2", "gpt-5.2-chat-latest", "gpt-5.2-pro"],
+    index=0
+)
+
+col_ai1, col_ai2 = st.columns(2)
+with col_ai1:
+    use_ai_A = st.checkbox("A版启用智能润色（不改变判断）", value=False, key="use_ai_A")
+    style_A = st.selectbox(
+        "A版润色档位",
+        options=["稳健监管版", "常规中性版", "更精炼版"],
+        index=0,
+        key="style_A",
+    )
+with col_ai2:
+    use_ai_B = st.checkbox("B版启用智能微调（去重且保持口径）", value=False, key="use_ai_B")
+    style_B = st.selectbox(
+        "B版微调档位",
+        options=["稳健监管版", "常规中性版", "更精炼版"],
+        index=0,
+        key="style_B",
+    )
 
 st.divider()
 st.subheader("输出模块选择")
@@ -229,38 +320,48 @@ custom_platform = st.text_area("自定义：互动平台舆情情况", height=80
 custom_advice = st.text_area("自定义：研判与建议", height=80, key="custom_advice")
 
 if st.button("生成"):
-    # ① 先定义，保证后面一定能用
+    # ① 先定义，保证后面一定存在
     signals = None
     final_mode = mode
 
-    # ② 如果是 auto，才计算
+    # ② auto 才做判定
     if mode == "auto":
         final_mode, signals = classify_auto(media_text, platform_text)
 
-    # ③ A / B 分支
+    # ③ 输出
     if out == "A":
-        result = render_A(company, window, final_mode)
+        base = render_A(company, window, final_mode)
+        result = rewrite_A_with_openai(base, style_profile=style_A, model_name=model_name) if use_ai_A else base
+
+        st.caption("A版：已调用AI微调" if use_ai_A else "A版：使用模板（未调用AI）")
         st.subheader("输出（A｜30秒版）")
         st.code(result)
+
     else:
         sections = render_B_sections(company, window, final_mode, media_text, signals)
 
+        def pick(key, custom_text, section_type):
+            if custom_text.strip():
+                st.caption(f"[{section_type}] 使用自定义覆盖（未调用AI）")
+                return custom_text.strip()
+
+            base_seg = sections[key]
+            if use_ai_B:
+                st.caption(f"[{section_type}] 调用AI微调")
+                return rewrite_B_with_openai(base_seg, section_type=section_type, style_profile=style_B, model_name=model_name)
+
+            st.caption(f"[{section_type}] 使用模板（未调用AI）")
+            return base_seg
+
         output = []
         if show_overall:
-            t = custom_overall.strip() or sections["overall"]
-            output.append("一、整体舆情情况\n" + t)
-
+            output.append("一、整体舆情情况\n" + pick("overall", custom_overall, "整体舆情情况"))
         if show_media:
-            t = custom_media.strip() or sections["media"]
-            output.append("二、财经媒体传播情况\n" + t)
-
+            output.append("二、财经媒体传播情况\n" + pick("media", custom_media, "财经媒体传播情况"))
         if show_platform:
-            t = custom_platform.strip() or sections["platform"]
-            output.append("三、互动平台舆情情况\n" + t)
-
+            output.append("三、互动平台舆情情况\n" + pick("platform", custom_platform, "互动平台舆情情况"))
         if show_advice:
-            t = custom_advice.strip() or sections["advice"]
-            output.append("四、研判与建议\n" + t)
+            output.append("四、研判与建议\n" + pick("advice", custom_advice, "研判与建议"))
 
         st.subheader("输出（B｜常规日报版）")
         st.code("\n\n".join(output))
@@ -275,4 +376,3 @@ st.code(
     "2) 运行：streamlit run app.py\n"
     "3) 选择模式与输出版本，点击“生成”即可复制结果"
 )
-
